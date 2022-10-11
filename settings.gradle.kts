@@ -26,6 +26,7 @@ include(
     "serialization_jackson_yaml",
     "serialization_jackson_xml",
     "http_client_jetty",
+    "http_client_netty",
     "http_server_servlet",
     "http_server_jetty",
     "http_server_netty",
