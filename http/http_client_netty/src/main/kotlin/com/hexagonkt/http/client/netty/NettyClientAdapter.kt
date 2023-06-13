@@ -1,31 +1,33 @@
 package com.hexagonkt.http.client.netty
 
-import com.hexagonkt.core.Jvm
+import com.hexagonkt.http.bodyToBytes
 import com.hexagonkt.http.client.HttpClient
 import com.hexagonkt.http.client.HttpClientPort
-import com.hexagonkt.http.model.HttpRequestPort
-import com.hexagonkt.http.model.HttpResponsePort
-import com.hexagonkt.http.model.ServerEvent
+import com.hexagonkt.http.model.*
 import com.hexagonkt.http.model.ws.WsSession
 import io.netty.bootstrap.Bootstrap
-import io.netty.bootstrap.ServerBootstrap
-import io.netty.channel.ChannelOption
-import io.netty.channel.EventLoopGroup
-import io.netty.channel.MultithreadEventLoopGroup
+import io.netty.buffer.Unpooled.wrappedBuffer
+import io.netty.channel.*
 import io.netty.channel.nio.NioEventLoopGroup
-import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
-import java.lang.UnsupportedOperationException
+import io.netty.handler.codec.http.DefaultFullHttpRequest
+import io.netty.handler.codec.http.FullHttpResponse
+import io.netty.handler.codec.http.HttpMethod
+import io.netty.handler.codec.http.HttpVersion
+import java.net.URI
 import java.util.concurrent.Flow.Publisher
 
 /**
  Client to use other REST services
  */
 open class NettyClientAdapter(
-    private val workerGroupThreads: Int
+    private val workerGroupThreads: Int,
 ) : HttpClientPort {
     private var started: Boolean = false
     private var workerEventLoop: MultithreadEventLoopGroup? = null
+    protected lateinit var httpClient: HttpClient
+    private var bootstrap: Bootstrap? = null
+    private val initializer = NettyClientInitializer()
 
     constructor() : this(
         workerGroupThreads = 1,
@@ -33,12 +35,9 @@ open class NettyClientAdapter(
 
     override fun startUp(client: HttpClient) {
         val workerGroup = groupSupplier(workerGroupThreads)
-        val bootstrap = bootstrapSupplier(workerGroup)
-
+        httpClient = client
+        bootstrap = bootstrapSupplier(workerGroup)
         workerEventLoop = workerGroup
-
-        // TODO: Implement client
-
         started = true
     }
 
@@ -50,7 +49,42 @@ open class NettyClientAdapter(
     override fun started(): Boolean = started
 
     override fun send(request: HttpRequestPort): HttpResponsePort {
-        TODO("Not yet implemented")
+        val baseUrl = httpClient.settings.baseUrl
+        val uri = (baseUrl ?: request.url()).toURI()
+        val channel = bootstrap?.connect(uri.host, uri.port)?.sync()?.channel()
+        val httpRequest = DefaultFullHttpRequest(
+            HttpVersion.HTTP_1_1,
+            HttpMethod.valueOf(request.method.toString()),
+            URI((baseUrl?.toString() ?: "") + request.path).toString(),
+            wrappedBuffer(bodyToBytes(request.body)),
+        )
+
+        val settings = httpClient.settings
+        val contentType = request.contentType ?: settings.contentType
+        val authorization = request.authorization ?: settings.authorization
+        httpRequest.headers().apply {
+            this.remove("accept-encoding") // Don't send encoding by default
+            if (contentType != null) {
+                this.add("content-type", contentType.text)
+            }
+            if (authorization != null) {
+                this.add("authorization", authorization.text)
+            }
+            (settings.headers + request.headers).values
+                .forEach { (k, v) -> this.add(k, v.map(Any::toString)) }
+        }
+
+        val responseHandler = initializer.responseHandler
+        channel?.writeAndFlush(request)
+        channel?.closeFuture()?.sync()
+
+        return convertResponseToHttpResponsePort(responseHandler.response)
+    }
+
+    private fun convertResponseToHttpResponsePort(response: FullHttpResponse): HttpResponsePort {
+        val body = response.content()
+        val status = response.status().code()
+        return HttpResponse(body = body, status = HttpStatus(status))
     }
 
     override fun sse(request: HttpRequestPort): Publisher<ServerEvent> {
@@ -78,4 +112,5 @@ open class NettyClientAdapter(
         Bootstrap().group(workerGroup)
             .channel(NioSocketChannel::class.java)
             .option(ChannelOption.SO_KEEPALIVE, true)
+            .handler(initializer)
 }

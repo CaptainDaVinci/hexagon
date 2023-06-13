@@ -27,4 +27,5 @@ interface HttpClientPort {
         onPong: WsSession.(data: ByteArray) -> Unit = {},
         onClose: WsSession.(status: Int, reason: String) -> Unit,
     ): WsSession
+
 }
